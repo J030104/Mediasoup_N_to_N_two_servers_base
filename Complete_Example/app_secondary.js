@@ -10,9 +10,11 @@ import { Server } from 'socket.io'
 import mediasoup from 'mediasoup'
 import cors from 'cors'
 
+const IP = '192.168.100.101'
 const port = 7000
-const primaryPort = 5000
 const rtcPorts = [8000, 8020]
+const primaryURL = 'https://192.168.100.101:5000'
+// const primaryPort = 5000
 // const limit = 1 // When the limit is reached, the room is full
 
 app.use(cors())
@@ -21,20 +23,20 @@ app.get('/sfu/*', (req, res, next) => {
     const path = '/sfu/'
 
     if (req.path.indexOf(path) == 0 && req.path.length > path.length) return next()
-    res.send(`You need to specify a room name in the path e.g. 'https://127.0.0.1:${port}/sfu/room'`)
+    res.send(`You need to specify a room name in the path e.g. 'https://ipaddr:${port}/sfu/room'`)
 })
 
 app.use('/sfu/:room', express.static(path.join(__dirname, 'public')))
 
 const options = {
     key: fs.readFileSync('./server/ssl/key.pem', 'utf-8'),
-    cert: fs.readFileSync('./server/ssl/cert.pem', 'utf-8')
+    cert: fs.readFileSync('./server/ssl/cert.pem', 'utf-8'),
+    passphrase: 'mediasoup',
 }
 
 const httpsServer = https.createServer(options, app)
 httpsServer.listen(port, () => {
     console.log('HTTP server is listening on port: ' + port)
-    console.log(`localhost:${port}/sfu/`)
 })
 
 const io = new Server(httpsServer, {
@@ -91,7 +93,6 @@ const createWorker = async () => {
 	// to connect to the main SFU 
     worker.observer.on('newrouter', router => {
         console.log('A new router was created')
-
     })
 
     return worker
@@ -119,7 +120,7 @@ const mediaCodecs = [ // Used to create a router (Room)
 const handleConnections = (connections, isLocal) => {
     connections.on('connection', async socket => {
         console.log("===============================================")
-        console.log(`New connection. Socket ID: ${socket.id}`)
+        console.log(`NEW CONNECTION - Socket ID: ${socket.id}`)
         console.log("===============================================")
 
         // Send back the socket id to the client
@@ -135,15 +136,16 @@ const handleConnections = (connections, isLocal) => {
             producers = removeItems(producers, socket.id, 'producer')
             transports = removeItems(transports, socket.id, 'transport')
 
-            // Cannot destructure property 'roomName' of 'peers[socket.id]' as it is undefined.
             // console.log('peer id:', socket.id)
-            const { roomName } = peers[socket.id]
-            delete peers[socket.id]
+            if (peers[socket.id]) { // Do this to avoid errors
+                const { roomName } = peers[socket.id]
+                delete peers[socket.id]
 
-            // remove socket from room
-            rooms[roomName] = {
-                router: rooms[roomName].router,
-                peers: rooms[roomName].peers.filter(socketId => socketId !== socket.id)
+                // remove socket from room
+                rooms[roomName] = {
+                    router: rooms[roomName].router,
+                    peers: rooms[roomName].peers.filter(socketId => socketId !== socket.id)
+                }
             }
         })
         
@@ -213,11 +215,11 @@ const handleConnections = (connections, isLocal) => {
             // console.log('DTLS Parameters: ', { dtlsParameters })
             getTransport(socket.id).connect({ dtlsParameters })
             // testing, client will establish connection with another server
-            callback(primaryPort)
+            callback(primaryURL)
         })
 
         // see client's socket.emit('transport-produce', ...)
-        socket.on('transport-produce', async ({ kind, rtpParameters, appData }, callback, servedByCurrSFU) => {
+        socket.on('transport-produce', async ({ kind, rtpParameters, appData }, callback) => {
             // call produce based on the prameters from the client
             const producer = await getTransport(socket.id).produce({
                 kind,
@@ -226,7 +228,7 @@ const handleConnections = (connections, isLocal) => {
 
             // add producer to the producers array
             const { roomName } = peers[socket.id]
-            addProducer(socket, producer, roomName, servedByCurrSFU)
+            addProducer(socket, producer, roomName, appData.servedByCurrSFU)
 
             informConsumers(roomName, socket.id, producer.id)
 
@@ -238,12 +240,16 @@ const handleConnections = (connections, isLocal) => {
                 producer.close()
                 console.log(`The transport for producer ${producer.id} is closed.`)
             })
-
-            // Send back to the client the Producer's id
-            callback({
-                id: producer.id,
-                producersExist: producers.length > 1 ? true : false
-            })
+            
+            try {
+                // Send back to the client the Producer's id
+                callback({
+                    id: producer.id,
+                    producersExist: producers.length > 1 ? true : false
+                })
+            } catch (error) {
+                console.log(error)
+            }
         })
         
         if (isLocal) { // Like a double check (since both the clients and the servers care about this) 
@@ -297,10 +303,10 @@ const handleConnections = (connections, isLocal) => {
                         })
 
                         consumer.on('producerclose', () => {
-                            console.log('Producer of consumer closed')
+                            console.log('A producer closed')
                             socket.emit('producer-closed', { remoteProducerId })
 
-                            consumerTransport.close([])
+                            consumerTransport.close()
                             transports = transports.filter(transportData => transportData.transport.id !== consumerTransport.id)
                             consumer.close()
                             consumers = consumers.filter(consumerData => consumerData.consumer.id !== consumer.id)
@@ -363,7 +369,7 @@ async function createRoom(roomName, socketId) {
     return router1
 }
 
-async function createWebRtcTransport (router) {
+async function createWebRtcTransport(router) {
     return new Promise(async (resolve, reject) => {
         try {
             // https://mediasoup.org/documentation/v3/mediasoup/api/#WebRtcTransportOptions
@@ -380,11 +386,11 @@ async function createWebRtcTransport (router) {
                 listenInfos: [
                     {
                         ip: '0.0.0.0',
-                        announcedAddress: '127.0.0.1', // This works
-                        // announcedAddress: '127.0.0.2', // This works as well
-                        // announcedAddress: '192.168.100.101', // Under same subnet, private IP can work
-                        // announcedAddress: '192.168.123.23', // Under same subnet, private IP can work
-
+                        announcedAddress: IP, // Under same subnet, private IP can work
+                        
+                        // ip: '127.0.0.1', // This doesn't work
+                        // announcedAddress: '127.0.0.1', // This points to the local machine, works.
+                        
                         /**
                          * Wireless LAN adapter Wi-Fi:
                          *    Connection-specific DNS Suffix  . :
@@ -394,9 +400,8 @@ async function createWebRtcTransport (router) {
                          *    Default Gateway . . . . . . . . . : 192.168.100.1
                          */
 
-                        // ip: '127.0.0.1', // This doesn't
                         // announcedAddress: '172.25.0.2', // Not exposed, only used in docker network
-                        // announcedAddress: '180.177.241.217', // Public IP
+                        // announcedAddress: '180.177.241.217', // Public IP doesn't if not registered
                     }
                 ],
                 enableUdp: true,
@@ -456,7 +461,7 @@ function addProducer(socket, producer, roomName, servedByCurrSFU) {
     }
 }
 
-function addConsumer(socket, consumer, roomName){
+function addConsumer(socket, consumer, roomName) {
     consumers = [
         ...consumers,
         { socketId: socket.id, consumer, roomName, }

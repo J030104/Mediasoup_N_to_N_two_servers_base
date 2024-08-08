@@ -10,44 +10,45 @@ import { Server } from 'socket.io'
 import mediasoup from 'mediasoup'
 import cors from 'cors'
 
+const IP = '192.168.100.101'
 const port = 5000
-const secondaryPort = 7000
 const rtcPorts = [6000, 6020]
+const secondaryURL = 'https://192.168.100.101:7000'
+// const secondaryPort = 7000
 
 app.use(cors())
 
 // Testing
-// const people = ["Jason", "Egg"]
-const people = []
+const localParticipants = []
+// const localParticipants = ["Jason", "Egg"]
 const limit = 2 // When the limit is reached, redirect to the secondary SFU
 
 app.get('/sfu/*', (req, res, next) => {
     const path = '/sfu/'
 
     if (req.path.indexOf(path) == 0 && req.path.length > path.length) {
-        if (people.length >= limit) {
+        if (localParticipants.length >= limit) {
             const roomName = req.path.substring(path.length)
-            const newUrl = `https://localhost:${secondaryPort}/sfu/${roomName}`
+            // const newUrl = `https://localhost:${secondaryPort}/sfu/${roomName}`
+            const newUrl = `${secondaryURL}/sfu/${roomName}`
             return res.redirect(newUrl)
         }
-        // currentParticipants++; // Increment the number of participants
         return next();
     }
-
-    res.send(`You need to specify a room name in the path e.g. 'https://127.0.0.1:${port}/sfu/room'`)
+    res.send(`You need to specify a room name in the path e.g. 'https://ipaddr:${port}/sfu/room'`)
 })
 
 app.use('/sfu/:room', express.static(path.join(__dirname, 'public')))
 
 const options = {
     key: fs.readFileSync('./server/ssl/key.pem', 'utf-8'),
-    cert: fs.readFileSync('./server/ssl/cert.pem', 'utf-8')
+    cert: fs.readFileSync('./server/ssl/cert.pem', 'utf-8'),
+    passphrase: 'mediasoup',
 }
 
 const httpsServer = https.createServer(options, app)
 httpsServer.listen(port, () => {
     console.log('HTTP server is listening on port: ' + port)
-    console.log(`localhost:${port}/sfu/`)
 })
 
 const io = new Server(httpsServer, {
@@ -125,19 +126,10 @@ const mediaCodecs = [ // Used to create a router (Room)
     },
 ]
 
-/**
- * 1. A client initiates a connection to the server.
- * 2. The server accepts the connection, creating a new socket instance for it.
- * 3. The server assigns a unique ID to this socket instance.
- * 4. The socket instance, along with its unique ID, is passed to the relevant event listener's callback function
- * 
- * To sum up, in this connection (between a client and the server),
- * the server is going to communicate through the socket passed to the callback.
- */
 const handleConnections = (connections, isLocal) => {
     connections.on('connection', async socket => {
         console.log("===============================================")
-        console.log(`New connection. Socket ID: ${socket.id}`)
+        console.log(`NEW CONNECTION - Socket ID: ${socket.id}`)
         console.log("===============================================")
 
         // Send back the socket id to the client
@@ -152,17 +144,20 @@ const handleConnections = (connections, isLocal) => {
             consumers = removeItems(consumers, socket.id, 'consumer')
             producers = removeItems(producers, socket.id, 'producer')
             transports = removeItems(transports, socket.id, 'transport')
-
-            // Cannot destructure property 'roomName' of 'peers[socket.id]' as it is undefined.
+            
             // console.log('peer id:', socket.id)
-            const { roomName } = peers[socket.id]
-            delete peers[socket.id]
+            if (peers[socket.id]) { // Do this to avoid errors
+                const { roomName } = peers[socket.id]
+                delete peers[socket.id]
 
-            // remove socket from room
-            rooms[roomName] = {
-                router: rooms[roomName].router,
-                peers: rooms[roomName].peers.filter(socketId => socketId !== socket.id)
+                // remove socket from room
+                rooms[roomName] = {
+                    router: rooms[roomName].router,
+                    peers: rooms[roomName].peers.filter(socketId => socketId !== socket.id)
+                }
             }
+            if (isLocal) localParticipants.pop()
+            console.log(`${localParticipants.length} person(s).`)
         })
         
         // Use async to make this process non-blocking
@@ -231,8 +226,8 @@ const handleConnections = (connections, isLocal) => {
             // console.log('DTLS Parameters: ', { dtlsParameters })
             getTransport(socket.id).connect({ dtlsParameters })
             // testing, client will establish connection with another server
-            people.push("Jason")
-            callback(secondaryPort)
+            if (isLocal) localParticipants.push("person")
+            callback(secondaryURL)
         })
 
         // see client's socket.emit('transport-produce', ...)
@@ -245,7 +240,7 @@ const handleConnections = (connections, isLocal) => {
 
             // add producer to the producers array
             const { roomName } = peers[socket.id]
-            addProducer(socket, producer, roomName, appData)
+            addProducer(socket, producer, roomName, appData.servedByCurrSFU)
             // console.log(servedByCurrSFU)
 
             informConsumers(roomName, socket.id, producer.id)
@@ -321,10 +316,10 @@ const handleConnections = (connections, isLocal) => {
                         })
 
                         consumer.on('producerclose', () => {
-                            console.log('Producer of consumer closed')
+                            console.log('A producer closed')
                             socket.emit('producer-closed', { remoteProducerId })
 
-                            consumerTransport.close([])
+                            consumerTransport.close()
                             transports = transports.filter(transportData => transportData.transport.id !== consumerTransport.id)
                             consumer.close()
                             consumers = consumers.filter(consumerData => consumerData.consumer.id !== consumer.id)
@@ -404,11 +399,11 @@ async function createWebRtcTransport(router) {
                 listenInfos: [
                     {
                         ip: '0.0.0.0',
-                        announcedAddress: '127.0.0.1', // This works
-                        // announcedAddress: '127.0.0.2', // This works as well
-                        // announcedAddress: '192.168.100.101', // Under same subnet, private IP can work
-                        // announcedAddress: '192.168.123.23', // Under same subnet, private IP can work
-
+                        announcedAddress: IP, // Under same subnet, private IP can work
+                        
+                        // ip: '127.0.0.1', // This doesn't work
+                        // announcedAddress: '127.0.0.1', // This points to the local machine, works.
+                        
                         /**
                          * Wireless LAN adapter Wi-Fi:
                          *    Connection-specific DNS Suffix  . :
@@ -418,9 +413,8 @@ async function createWebRtcTransport(router) {
                          *    Default Gateway . . . . . . . . . : 192.168.100.1
                          */
 
-                        // ip: '127.0.0.1', // This doesn't
                         // announcedAddress: '172.25.0.2', // Not exposed, only used in docker network
-                        // announcedAddress: '180.177.241.217', // Public IP
+                        // announcedAddress: '180.177.241.217', // Public IP doesn't if not registered
                     }
                 ],
                 enableUdp: true,

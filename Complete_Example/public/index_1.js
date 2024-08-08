@@ -1,6 +1,6 @@
 const io = require('socket.io-client')
 const mediasoupClient = require('mediasoup-client')
-const { Socket } = require('socket.io')
+// const { Socket } = require('socket.io') // ?
 
 const roomName = window.location.pathname.split('/')[2]
 
@@ -11,12 +11,6 @@ socket_primary.on('connection-success', ({ socketId }) => {
     console.log("Connection Success. Socket: ", socketId)
     getLocalStream()
 })
-
-// Not here
-// socket_secondary.on('connection-success', ({ socketId }) => {
-//     console.log("Connection Success. to another Socket: ", socketId)
-//     // getLocalStream()
-// })
 
 let device
 let rtpCapabilities
@@ -55,33 +49,18 @@ let params = {
 
 let audioParams;
 let videoParams = { params };
-let consumingTransports = []; // ? Should be dealt with when closing transport
+let consumingTransports = []; // ? should be dealt with when closing transport
 
-const joinRoom_new = (socket) => {
+const joinRoom = (socket, isFirst) => {
     socket.emit('joinRoom', { roomName }, (data) => {
         console.log(`Router RTP Capabilities... ${data.rtpCapabilities}`)
-        // we assign to local variable and will be used when
-        // loading the client Device (see createDevice above)
-        
-        // Assume they're the same
-        // rtpCapabilities = data.rtpCapabilities 
-
-        console.log("Joined the room on the secondary SFU.")
-        // once we have rtpCapabilities from the Router, create Device
-        // createDevice()
-        createSendTransport(socket_secondary, false)
-    })
-}
-
-const joinRoom = (socket) => {
-    socket.emit('joinRoom', { roomName }, (data) => {
-        console.log(`Router RTP Capabilities... ${data.rtpCapabilities}`)
-        // we assign to local variable and will be used when
-        // loading the client Device (see createDevice above)
-        rtpCapabilities = data.rtpCapabilities
-
-        // once we have rtpCapabilities from the Router, create Device
-        createDevice()
+        if (isFirst) {
+            rtpCapabilities = data.rtpCapabilities
+            createDevice()
+        } else {
+            console.log("Joined the room on the secondary SFU.")
+            createSendTransport(socket_secondary, false)
+        }
     })
 }
 
@@ -92,8 +71,7 @@ const streamSuccess = (stream) => {
     // audioParams = { track: stream.getAudioTracks()[0], ...audioParams };
     videoParams = { track: stream.getVideoTracks()[0], ...videoParams };
 
-    // socket_primary is the default
-    joinRoom(socket_primary)
+    joinRoom(socket_primary, true)
 }
 
 const getLocalStream = () => {
@@ -110,28 +88,20 @@ const getLocalStream = () => {
             }
         }
     })
-    // .then(stream => { streamSuccess(socket, stream) }) // stream is passed in
     .then(streamSuccess)
     .catch(error => {
         console.log(error.message)
     })
 }
 
-// A device is an endpoint connecting to a router on the server side to send/receive media
 async function createDevice() {
     try {
         device = new mediasoupClient.Device()
-
-        // https://mediasoup.org/documentation/v3/mediasoup-client/api/#device-load
-        // Loads the device with RTP capabilities of the Router (server side)
         await device.load({
-            // see getRtpCapabilities() below
             routerRtpCapabilities: rtpCapabilities
         })
-
         console.log('Device RTP Capabilities', device.rtpCapabilities)
 
-        // once the device loads, create transport
         createSendTransport(socket_primary, true)
     } catch (error) {
         console.log(error)
@@ -139,7 +109,6 @@ async function createDevice() {
             console.warn('browser not supported')
     }
 }
-
 
 const createSendTransport = (socket, isFirstTransport) => {
     // see server's socket.on('createWebRtcTransport', sender?, ...)
@@ -172,20 +141,18 @@ const createSendTransport = (socket, isFirstTransport) => {
                 await socket.emit('transport-connect', {
                     dtlsParameters,
                 },
-                (anotherPort) => {
+                (URL) => {
                     if (isFirstTransport) { // The second time and later transport creation doesn't need to do this again.
                         // No matter what, clients should establish connection with another SFU (in development)
-                        console.log(`Start establishing connection with another SFU. (port ${anotherPort})`)
-                        socket_secondary = io(`http://localhost:${anotherPort}/anotherSFU`)
+                        console.log(`Start establishing connection with another SFU. (${URL})`)
+                        socket_secondary = io(`${URL}/anotherSFU`)
                         
                         socket_secondary.on('connection-success', ({ socketId }) => {
                             console.log("Connection Success. Socket: ", socketId)
-                            // createSendTransport(socket_secondary, false)
-                            // getLocalStream(socket_secondary)
-                            joinRoom_new(socket_secondary)
+                            joinRoom(socket_secondary, false)
                         })
 
-                        socket_secondary.on('new-producer', ({ producerId }) => signalNewConsumerTransport(socket_secondary, producerId))
+                        // socket_secondary.on('new-producer', ({ producerId }) => signalNewConsumerTransport(socket_secondary, producerId))
 
                         socket_secondary.on('producer-closed', ({ remoteProducerId }) => {
                             // server notification is received when a producer is closed
@@ -196,7 +163,8 @@ const createSendTransport = (socket, isFirstTransport) => {
                         
                             // remove the consumer transport from the list
                             consumerTransports = consumerTransports.filter(transportData => transportData.producerId !== remoteProducerId)
-                        
+                            consumingTransports = consumingTransports.filter(producerId => producerId !== remoteProducerId)
+
                             // remove the video div element
                             videoContainer.removeChild(document.getElementById(`td-${remoteProducerId}`))
                         })
@@ -223,7 +191,7 @@ const createSendTransport = (socket, isFirstTransport) => {
                 await socket.emit('transport-produce', {
                         kind: parameters.kind,
                         rtpParameters: parameters.rtpParameters,
-                        appData: servedByCurrSFU
+                        appData: { servedByCurrSFU }
                     },
                     ({ id, producersExist }) => {
                         // Tell the client side transport that parameters were transmitted
@@ -264,36 +232,36 @@ const connectSendTransport = async (isFirstTransport) => {
 
     // ?
     // audioProducer.on('trackended', () => {
-    //     console.log('audio track ended')
+    //     console.log('Audio track ended')
     //     // close audio track
     //     audioProducer.close()
     // })
 
     // audioProducer.on('transportclose', () => {
-    //     console.log('audio transport ended')
+    //     console.log('Audio transport closed')
     //     // close audio track
     //     audioProducer.close()
     // })
 
     videoProducer.on('trackended', () => {
-        console.log('video track ended')
+        console.log('Video track ended')
         // close video track
-        videoProducer.close()
+        // videoProducer.close()
     })
 
     videoProducer.on('transportclose', () => {
-        console.log('video transport ended')
+        console.log('Video transport closed')
         // close video track
-        videoProducer.close()
+        // videoProducer.close()
     })
 }
 
 // ********************************************************************************
 
 const signalNewConsumerTransport = async (socket, remoteProducerId) => {
-    //check if we are already consuming the remoteProducerId
+    // check if we are already consuming the remoteProducerId
     if (consumingTransports.includes(remoteProducerId)) return;
-    consumingTransports.push(remoteProducerId);
+    // consumingTransports.push(remoteProducerId);
 
     await socket.emit('createWebRtcTransport', { consumer: true }, ({ params }) => {
         // The server sends back params needed to create Recv Transport on the client side
@@ -324,6 +292,8 @@ const signalNewConsumerTransport = async (socket, remoteProducerId) => {
                     serverConsumerTransportId: params.id,
                 })
 
+                consumingTransports.push(remoteProducerId);
+                
                 // Tell the transport that parameters were transmitted.
                 callback()
             } catch (error) {
@@ -367,7 +337,6 @@ const connectRecvTransport = async (socket, consumerTransport, remoteProducerId,
                 console.log('Cannot Consume')
                 return
             }
-
             // console.log(`Consumer parameters: ${params}`)
             console.log("Consumer parameters received")
             
@@ -399,7 +368,7 @@ const connectRecvTransport = async (socket, consumerTransport, remoteProducerId,
             } else {
                 //append to the video container
                 newElem.setAttribute('class', 'remoteVideo')
-                newElem.innerHTML = '<video id="' + remoteProducerId + '" autoplay class="video" ></video>'
+                newElem.innerHTML = '<video id="' + remoteProducerId + '" autoplay class="video"></video>'
             }
 
             videoContainer.appendChild(newElem)
@@ -424,6 +393,7 @@ socket_primary.on('producer-closed', ({ remoteProducerId }) => {
 
     // remove the consumer transport from the list
     consumerTransports = consumerTransports.filter(transportData => transportData.producerId !== remoteProducerId)
+    consumingTransports = consumingTransports.filter(producerId => producerId !== remoteProducerId)
 
     // remove the video div element
     videoContainer.removeChild(document.getElementById(`td-${remoteProducerId}`))
